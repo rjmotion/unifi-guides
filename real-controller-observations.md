@@ -139,15 +139,25 @@ From `cameras.log`, the ingest configuration pushed to each channel:
   "type":"h265"}}}
 ```
 
-### 3.1 Single push port — **confirmed, and the disagreement is settled**
+### 3.1 Single push port — confirmed **for this model**
 
 All three channels were given **`tcp://<CONTROLLER-IP>:7550`**, and three TCP
 connections from the camera to :7550 were established. [MEASURED-LOG] + observed
 via `ss`
 
-This closes `protocol-reference.md` §9 open question 5 **in this project's
-favour**, and contradicts `scrypted-unifi-direct`'s reported per-track ports
-17550–17552. Demultiplex by `streamName`, never by port.
+This confirms the single-port behaviour recorded in `protocol-reference.md` for
+the **G5 PTZ**. It does **not** settle §9 open question 5, and the earlier framing
+of this as a disagreement to be won was wrong.
+
+`scrypted-unifi-direct` reports per-track ports **17550–17552 working** on a G5
+Turret Ultra (fw 5.3.90). A working implementation is evidence, not a mistake —
+so the honest reading is that **this is model- or firmware-dependent**, and both
+observations stand on their own hardware.
+
+**What that means for a receiver:** don't hardcode either. Set the destinations
+you want, then demultiplex by the `streamName` you assigned, and be prepared for
+the camera to collapse every track onto the first port regardless of what you
+asked for. That works under both behaviours; keying on port only works under one.
 
 ### 3.2 The codec is **H.265**, not H.264
 
