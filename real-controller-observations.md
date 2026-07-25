@@ -771,3 +771,103 @@ advertise them) — including `clarityZones`, `excludeZones`, `hasSmartZoom`,
 Note `pan`, `tilt`, `zoom`, `focus` and `hotplug` appear on the Protect side as
 **nested objects**, matching the `features.pan.steps` shape in §3 — they are not
 booleans.
+
+---
+
+## 13. PTZ, fully mapped — `[MEASURED]`
+
+Driving `POST /proxy/protect/integration/v1/cameras/{id}/ptz/goto/{slot}` against
+four presets, capturing `:7442` throughout. This closes the largest remaining gap.
+
+### 13.1 `Preset` is a two-step, action-based verb — and `AbsolutePosition` is never used
+
+```json
+Preset {"action":"config",
+        "items":[{"index":1,"name":"Preset 2","pan":23502,"tilt":8000,"zoom":0,"focus":59}]}
+
+Preset {"action":"go","index":1,"speed":1000,"notifyCommandStatus":{}}
+```
+
+1. **`config`** pushes the preset *definition* — index, name, and raw motor
+   `pan`/`tilt`/`zoom` **plus `focus`**.
+2. **`go`** executes it by index, with a `speed` and `notifyCommandStatus`.
+
+**The controller does not send `AbsolutePosition` at all.** A move to arbitrary
+coordinates is expressed as *configure a preset, then go to it*. That reframes
+`protocol-reference.md` §8 completely: the reason `AbsolutePosition` looked like
+the only thing that moved the gimbal is that it was being sent over SSH/IPC to
+`ubnt_ptz` directly — the daemon's own interface. **Over `:7442`, the controller's
+vocabulary is `Preset`.**
+
+Note this is the *same verb* seen during adoption with
+`{"trackTimeoutSec":20,"backToPresetPosition":true}` (§2) — so `Preset` is
+multiplexed by `action`, and that adoption-time message is a third action
+configuring auto-tracking return behaviour. Our earlier "rejected `Preset`" was a
+malformed call, not an unsupported one.
+
+`speed: 1000` here, against the `500 = saturation` measured for `AbsolutePosition`
+over IPC — the scales are not the same and should not be assumed equivalent.
+
+### 13.2 `GetCurrentPosition` **is** polled — position is not broadcast-only
+
+The controller sends `GetCurrentPosition {"inDegree":true,"inSteps":true}`
+**repeatedly** — before the move, during it, and several times after it settles.
+
+`unifi-camera-reference.md` §9 states position "cannot be *queried*, you
+subscribe" and that `GetCurrentPosition` times out. **On `:7442` it is a
+polled request/response**, and the controller relies on it. The earlier timeout
+was an IPC-path artefact, and the payload shape is what made it work.
+
+**Both mechanisms are live at once**: the controller polls *and* the camera
+broadcasts — 80 `EventMotorState` messages for a single preset move.
+
+### 13.3 `EventMotorState` carries more than documented
+
+```json
+{"ignoreActivity": true,
+ "state": {"activity": 16, "focusMode": "manual", "scale": "normalized",
+           "position": {"focus": 58, "pan": 23502, "tilt": 8000, "zoom": 0},
+           "wallClockMs": 1784989188609}}
+```
+
+New against the guides' recorded shape: **`ignoreActivity`**, **`focusMode`**, and
+**`scale: "normalized"`** — the last implying position may be reported in more
+than one coordinate system, which a consumer must not assume. `activity: 16` is a
+value not previously seen (§9 records 0 settled, 12 moving, 8 elsewhere); treat it
+as a flag word, not a magnitude, as the guides already advise.
+
+The final broadcast's `position` matches the requested preset exactly
+(`pan 23502, tilt 8000` for Preset 2), so it is a reliable completion signal.
+
+### 13.4 `GetRequest` is the snapshot upload trigger — and it exposes port 7444
+
+`protocol-reference.md` §9 lists `GetRequest` as "believed a snapshot-upload
+trigger; shape unconfirmed". Confirmed:
+
+```json
+GetRequest {"what": "snapshot",
+            "uri": "https://<controller>:7444/internal/camera-upload/<token>",
+            "timeoutMs": 60000,
+            "quality": "medium"}
+```
+
+The controller hands the camera a **one-time upload URL** and the camera **pushes
+the image back** — the inverse of the pull model one might assume. Each request
+carries a fresh opaque token.
+
+⚠️ **Port 7444/TCP is the camera-upload endpoint**, path
+`/internal/camera-upload/<token>`. Ubiquiti's own adoption documentation lists
+7444 without saying what it does; this is what it does. Any controller emulator
+wanting snapshots must serve it.
+
+`quality` is an enum — `"medium"` observed.
+
+### 13.5 What this means for an emulator
+
+- Implement `Preset` with `action: config` / `action: go`, not `AbsolutePosition`.
+- Serve **:7444** with a token-scoped upload endpoint, and drive snapshots with
+  `GetRequest`.
+- Poll `GetCurrentPosition` *and* consume `EventMotorState`; the real controller
+  does both.
+- Preset definitions include **focus**, so a four-axis model (pan/tilt/zoom/focus)
+  is the right shape — not the three-axis one in cuckoo.old's `ptz-model.md`.
