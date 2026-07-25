@@ -22,6 +22,7 @@ inferred · `[U]` unverified.
 | **7550** | TCP plain | camera → controller | H.264 push, extendedFlv. **All H.264 tracks share this one port** |
 | **7551** | TCP plain | camera → controller | MJPEG push |
 | **10001** | UDP | camera → broadcast | Discovery |
+| **7004** | UDP | talkback | Two-way audio. AAC, mono, 22050 Hz, 16-bit; `typeIn: "serverudp"`. See `real-controller-observations.md` §12.3 [MEASURED] |
 | 22 / 443 | TCP | controller → camera | SSH; the camera's own local API |
 
 The camera listens only on 22/80/443/10001. **Every media and control channel is
