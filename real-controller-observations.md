@@ -613,3 +613,161 @@ operation to watch when testing the two-key audio object.
 records it and acts on it during its own analysis. Useful negative information:
 an emulator does not need to implement everything the API exposes, and a message
 absent from a capture may simply never have existed.
+
+---
+
+## 12. Client-driven sweep — `[MEASURED]`
+
+A systematic pass with both API clients, capturing `:7442` throughout. Method in
+[`techniques.md`](techniques.md) §13.
+
+### 12.1 `ChangeIspSettings` — the documented payload is substantially wrong
+
+The real message carries **36 fields**. `protocol-reference.md` §4 documents 42.
+**Only 21 overlap.**
+
+**Sent but undocumented (15):**
+
+```
+autoFlipMirror  colorNightVision  dZoomCenterX  dZoomCenterY  dZoomScale
+dZoomStreamId   enableExternalIr  hdrMode       icrCustomValue  icrSwitchMode
+lensDistortionCorrection  masks  smokeCoverMode  spotlightDuration  zonesAutoFlipMirror
+```
+
+**Documented but never sent (21):** `aeTargetPercent`, `criticalTmpOfProtect`,
+`darkAreaCompensateLevel`, `enableMicroTmpProtect`, `forceFilterIrSwitchEvents`,
+`icrLightSensorNightThd`, `queryIrLedStatus`, and **the entire `irOnSts*` and
+`irOnVal*` families** (12 fields).
+
+⚠️ **`aeTargetPercent` is among the missing.** `unifi-camera-reference.md` §7
+builds an exposure table on it — that table may still be valid for a *directly
+driven* camera, but a real controller does not use that field. Anything relying on
+the `irOnSts`/`irOnVal` families should be treated as unverified.
+
+`masks` confirms §11.3: privacy masking is carried inside `ChangeIspSettings`.
+`dZoom*` fields indicate digital zoom, consistent with this model reporting
+`canOpticalZoom: false`.
+
+### 12.2 `ChangeAudioEventsSettings` — schema validated, and trimmed
+
+The recovered schema in `unifi-camera-reference.md` §10 is **correct about types
+and wrong about size**. The real payload is **13 keys**:
+
+```json
+{"enableAlrmBabyCry":1,"enableAlrmBark":0,"enableAlrmBurglar":0,"enableAlrmCarHorn":0,
+ "enableAlrmCmonx":1,"enableAlrmGlassBreak":0,"enableAlrmSiren":0,"enableAlrmSmoke":1,
+ "enableAlrmSpeak":1,"recordEventCmonx":0,"recordEventSmoke":0,"recordEventSpeak":0,
+ "sendPulse":0}
+```
+
+- ✅ **Values are integers `0|1`, never booleans** — the guides' claim is confirmed
+  on the wire.
+- ❌ **No thresholds, no lingers, no level bounds, no `pulsePeriodSec`.** The
+  documented `thresholdEvent*`, `linger*StartSec/StopSec`, `smokeThreshold`,
+  `cmonxThreshold`, `levelUpperBound`, `levelLowerBound`, `leveldBShifter` are
+  **not sent**.
+- ❌ `enableLoudNoise` and `enableSoundLoss` are documented but absent.
+- Only **three** `recordEvent*` keys exist (Cmonx, Smoke, Speak) — not one per
+  class. Notably there is no `recordEventBabyCry` even when baby-cry is enabled.
+- The controller sends **all nine** `enableAlrm*` keys even though this camera
+  advertises only four supported classes (`alrmSmoke`, `alrmCmonx`, `alrmBabyCry`,
+  `alrmSpeak`).
+
+**And it is safe.** Driving it repeatedly produced clean acks every time. That is
+now the fourth independent confirmation that §6's "hazardous" rating was an
+artefact of a boot-disabled daemon.
+
+### 12.3 Talkback — the settings, without needing a speaker
+
+`ChangeTalkbackSettings` is `[UNVERIFIED]` throughout the guides. The bootstrap
+exposes the live values even on a camera reporting `hasSpeaker: false`:
+
+```json
+{"typeFmt":"aac","typeIn":"serverudp","bindAddr":"0.0.0.0","bindPort":7004,
+ "filterAddr":null,"filterPort":null,"channels":1,"samplingRate":22050,
+ "bitsPerSample":16,"quality":100}
+```
+
+**Talkback is AAC over UDP on port 7004**, mono, 22.05 kHz, 16-bit. `typeIn`
+`serverudp` indicates a bound UDP listener rather than the outbound-TCP pattern
+the media channels use.
+
+⚠️ **Port 7004 is not in any port table in these guides.** Add it.
+
+Driving talkback is refused client-side (`Camera does not have speaker`) before
+any request is issued, which likely explains why this was never mapped.
+
+### 12.4 `StartService` / `StopService` are a symmetric pair
+
+```json
+StopService   {"service": "ssh"}
+StartService  {"service": "ssh"}
+```
+
+A service-name field in both directions. That the verb is parameterised — rather
+than an `EnableSsh`-style dedicated message — is the interesting part: it suggests
+**any service name may be startable**, which bears directly on
+`unifi-camera-reference.md` §13's question about what re-enables `ubnt_ptz`.
+
+**Not yet tested**, because no client exposes an arbitrary service name; it needs
+a controller that can send a chosen payload — i.e. `cuckoo`.
+
+### 12.5 The realtime bus is a delta stream, not a relay
+
+The controller's realtime API carries `{header, payload}` packets:
+
+| header | payload |
+|---|---|
+| `action=add modelKey=event` | `type, start, locked, isFavorite, favoriteObjectIds, score` |
+| `action=update modelKey=nvr` | `lastSeen, wanPorts, portStatus` / `systemInfo` |
+| `action=update modelKey=automation` | `status, cooldown` |
+
+`payload` carries **only changed fields**, keyed by `modelKey` and `id`.
+
+**Camera events are not relayed verbatim.** The camera sends `EventSmartDetect` on
+`:7442`; the controller *synthesises* a Protect `event` record with fields the
+camera never sent — `score`, `locked`, `isFavorite`, `favoriteObjectIds`. So a
+`lyrebird` that emits camera-side events gets Protect-side records built for it,
+and a `cuckoo` consuming camera events must construct these itself.
+
+### 12.6 Codec and audio — independently confirmed
+
+§9.3 and §9.4 rested on one packet capture parsed by one hand-written FLV walker.
+Re-checked through a completely separate path — hjdhjd's livestream API, which
+returns fMP4 rather than `extendedFlv` — and read with `ffprobe`:
+
+```
+codec_name=hevc   video   2688x1512
+codec_name=aac    audio   16000 Hz   1 channel
+```
+
+**H.265 confirmed. AAC-LC 16 kHz mono confirmed.** Two independent transports, two
+independent parsers, same answer. The fMP4 `stsd` carries `hvc1`, which is the
+conventional HEVC fourcc — so Ubiquiti's non-standard `codecId 8` (§9.4) is a
+quirk of *their* FLV container only; the controller re-muxes to standard fMP4 on
+the way out.
+
+### 12.7 Feature flags — the authoritative list for `cuckoo`
+
+Protect's bootstrap reports **57** flags; `ds`'s `CameraFeatureFlags` struct
+defines **68** names. **39 appear in both** — that intersection is what a camera
+emulator should be prepared to advertise:
+
+```
+audioCodecs audioStyle canAdjustIrLedLevel canMagicZoom canOpticalZoom
+canTouchFocus hasAec hasBluetooth hasColorLcdScreen hasExternalIr
+hasFingerprintSensor hasHdr hasIcrSensitivity hasInfrared hasLcdScreen hasLdc
+hasLedStatus hasLineCrossing hasLineCrossingCounting hasLineIn
+hasLiveviewTracking hasMic hasMotionZones hasPrivacyMask hasRtc hasSdCard
+hasSpeaker hasSquareEventThumbnail hasVerticalFlip hasWifi isDoorbell isPtz
+lensModel mountPositions smartDetectAudioTypes supportFullHdSnapshot supportNfc
+videoModeMaxFps videoModes
+```
+
+29 exist only in `ds` (the controller understands them; this camera does not
+advertise them) — including `clarityZones`, `excludeZones`, `hasSmartZoom`,
+`hasTamperDetection`, `presetTour`, `streamEncryptable`, `videoCodecs`.
+
+Note `pan`, `tilt`, `zoom`, `focus` and `hotplug` appear on the Protect side as
+**nested objects**, matching the `features.pan.steps` shape in §3 — they are not
+booleans.
