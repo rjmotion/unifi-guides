@@ -26,7 +26,7 @@ heading.
 | Controller address | <CONTROLLER-IP> |
 | Protect device id | `<CAMERA-ID>` |
 | Date | 2026-07-25 |
-| Source | `/srv/unifi-protect/logs/cameras.avclient.log`, `cameras.log` |
+| Source | `cameras.avclient.log`, `cameras.log`, and — for §9 — **plaintext WebSocket frames** from `ds`'s own `trace.log_websocket_payload`, plus a `:7550` packet capture |
 
 ### Placeholders — how to get your own values
 
@@ -48,8 +48,12 @@ and payload shapes, but it is one step removed from the transport. Anything
 depending on exact framing, ordering under load, or ack behaviour should be
 confirmed with a packet capture before being relied on.
 
-Tagged `[MEASURED-LOG]` throughout to keep this distinct from the `[MEASURED]`
+Tagged `[MEASURED-LOG]` in §§1–8 to keep this distinct from the `[MEASURED]`
 (observed on the wire / on hardware) used elsewhere in `guides/`.
+
+**[§9](#9-plaintext-capture--measured) is different.** It is built from 263
+plaintext JSON envelopes and a packet capture, so it is tagged `[MEASURED]` — and
+it **corrects two claims made in §3**. Where the two sections disagree, §9 wins.
 
 ---
 
@@ -188,10 +192,16 @@ The real controller never asks for AAC. It sends:
 ```
 
 **`withOpus` does not appear anywhere in the existing guides.** The camera's own
-hello advertises `"audioCodecs":["aac","opus"]`, and the controller picks
-**opus**. This is the strongest available candidate for the unsolved audio
-problem. [MEASURED-LOG] — *not yet verified to actually produce audio tags; that
-is the next experiment.*
+hello advertises `"audioCodecs":["aac","opus"]`. [MEASURED-LOG]
+
+> ### ⚠️ Superseded — see §9
+>
+> A packet capture of `:7550` has since **overturned §8's conclusion outright**:
+> audio tags *do* flow, ~950–1100 per stream. But **not as Opus** — the wire
+> carries **AAC-LC, 16 kHz, mono**, despite `withOpus:true` being requested.
+>
+> So "withOpus is the missing lever" was **wrong**. The likely lever is the
+> *shape of the audio object*, not the codec — see §9.3. [MEASURED]
 
 ### 3.5 Destinations use query parameters, not a path suffix
 
@@ -330,3 +340,158 @@ The controller is live and driveable via the integration API
 5. **`AbsolutePosition` over :7442** — given `GetCurrentPosition` works with the
    right payload, re-test absolute moves rather than treating §8 as settled.
 6. **What re-enables SSH**, given `StopService{"service":"ssh"}` disables it.
+
+---
+
+## 9. Plaintext capture — `[MEASURED]`
+
+Everything above is `[MEASURED-LOG]`. This section is **wire-verified**, and it
+overturns several conclusions — including two of my own from §3.
+
+### 9.1 Method: `ds` will log its own plaintext. No MITM, no debugger.
+
+`:7442` is TLS, so a packet capture yields ciphertext. `:7550` is plain TCP and
+fully readable. For the management channel, the useful discovery is that the
+daemon serving `:7442` — **`ds`**, a Rust binary using `tokio-tungstenite` — has
+payload tracing built in and switched off by default:
+
+```jsonc
+// /usr/share/ds/ds.json
+"trace": {
+  "log_websocket_payload": false,   // -> true: hex+ASCII frame dumps in /srv/ds/logs/ds.log
+  "dump_websocket_payload": false,  // -> true: JSON envelopes in /srv/ds/logs/payloads.jsonl
+  "auto_dump_websocket_threshold": 50
+}
+```
+
+Set both to `true`, `systemctl restart ds`, and the complete JSON envelopes appear
+in the clear, both directions. **263 envelopes** were recovered this way by
+reassembling the hex dumps.
+
+Worth knowing why the alternatives fail: `ds` links **no libssl**, so there are no
+`SSL_read`/`SSL_write` symbols for `LD_PRELOAD` or a debugger to hook. A TLS MITM
+would work — the camera doesn't validate the controller's certificate — but is
+unnecessary given the above.
+
+`dump_websocket_payload` is event-gated and captured only `EventSmartDetect`;
+`log_websocket_payload` is the one that yields everything.
+
+### 9.2 `timeSync` — the guides' payload is wrong, and this answers the clock question
+
+`unifi-camera-reference.md` §13 asks how a real controller syncs the camera clock,
+with NTP as the hypothesis. It is **not NTP**. The reply is a two-timestamp
+exchange:
+
+```json
+ubnt_avclient_timeSync   {"t1": 1784981269413, "t2": 1784981269413}
+```
+
+The guides record the reply as carrying `monotonicMs`, `wallMs`, `wallClockMs`,
+`time`, `seconds`, `timeDelta`. **None of those appear.** `t1`/`t2` is an
+NTP-style offset exchange done in-band over `:7442`. It is also the single most
+frequent message on the channel — 42 from the camera, 20 from the controller in
+one session. [MEASURED]
+
+### 9.3 Audio: it flows, it's AAC, and the lever is the *shape* of the audio object
+
+`unifi-camera-reference.md` §8 concludes "a third-party controller cannot get
+in-band audio" after an exhaustive table of failures, and §13 asks what sets
+`av.audio.volume`. Both are now answered.
+
+**Audio tags flow: ~950–1100 per stream, on all three channels.** Format from the
+wire: `af 00` sequence header, `soundFormat=10` (AAC), AudioSpecificConfig
+`objectType=2` (AAC-LC), **16000 Hz, mono**. [MEASURED]
+
+What the real controller sends in `ChangeVideoSettings`:
+
+```json
+"audio": {"bitRate": 64000, "volume": 100}
+```
+
+**Two keys.** The guides' failed attempts sent a ten-key object — `bitRate`,
+`channels`, `description`, `enableTemporalNoiseShaping`, `enabled`, `mode`,
+`quality`, `sampleRate`, `type`, `volume` — and recorded that the camera
+"force-resets `volume` to 0 in the echo, every time".
+
+The real controller sends `volume: 100` in a minimal two-key object **and audio
+works**. That makes the *shape* of the audio object the leading suspect, not the
+codec and not `withOpus`. Testing a two-key `{bitRate, volume}` against a
+third-party controller is the obvious next experiment. [MEASURED] / lever
+[INFERRED]
+
+### 9.4 Video codec id is **8**
+
+Every video tag carries `codecId = 8` — never 7 (AVC) and never 12 (the
+conventional HEVC-in-FLV id). The sequence header arrives with `frameType = 6`.
+FLV flags byte is `0x07` as the guides record. **A receiver must map `8 → HEVC`;
+no standard demuxer will.** [MEASURED]
+
+### 9.5 The hello reply and `paramAgreement` are much smaller than documented
+
+```json
+ubnt_avclient_hello (controller -> camera)
+  keys: protocolVersion, controllerName, controllerUuid, controllerVersion, overrideUuid
+
+ubnt_avclient_paramAgreement (controller -> camera)
+  {"enableStatusCodes": true, "useHeartbeats": false, "heartbeatsTimeoutMs": 60000}
+```
+
+Three things: **`overrideUuid` is actually sent** (the guides list it as an
+unexercised escape hatch); the hello reply carries **no `adoptionCode` and no
+`features` block**; and `paramAgreement` carries **no `authToken` and no
+`features`** — nothing like the `{authToken, features, controllerUuid, uuid}` the
+guides record. Note `useHeartbeats: false` with a 60 s timeout. [MEASURED]
+
+### 9.6 The PTZ channel is a separate WebSocket with subprotocol `ptz1`
+
+From `devices.websockets.log`:
+
+```
+onConnection() Received websocket connection wsproto=secure_transfer   isAvClient=true
+onConnection() Received websocket connection wsproto=ptz1              isAvClient=false
+```
+
+So `EnablePtzControl{uri}` (§1) causes the camera to open a **second** WebSocket
+to the same `/camera/1.0/ws` path, negotiating subprotocol **`ptz1`** instead of
+`secure_transfer`. That completes the `PtzWebsockHandler` picture: the trigger,
+the URI, and the distinguishing subprotocol. [MEASURED]
+
+Also observed on that channel: `Preset` rejected with a non-zero status code, an
+automatic *"Returning home after 30000ms"*, and `disablePtzControlMany` returning
+`ENOSYS`.
+
+### 9.7 A fingerprint check gates the connection
+
+Before accepting either WebSocket, the controller runs:
+
+```
+verifyFingerprintHttp fingerprint=<20-byte colon-separated hex>
+  -> Fingerprint matches camera.fingerprint
+```
+
+A SHA-1-length fingerprint compared against a stored per-camera value. **This
+appears nowhere in the existing guides**, and any controller emulator will have to
+satisfy or bypass it. [MEASURED]
+
+### 9.8 Vocabulary not previously documented
+
+| Message | Direction | Payload |
+|---|---|---|
+| `EventStreamChanged` | camera → controller | `{}` — frequent (26 in one session) |
+| `EventLowMemoryState` | camera → controller | `{"clockMonotonic":…,"clockWall":…,"process":"audio_events","state":"enabled"}` |
+| `SendWeatherUpdate` | **both directions** | controller pushes weather; camera responds |
+| `ChangeClarityZones`, `ChangeInterfaceSettings`, `UpdateFaceDBRequest`, `ChangeSmartMotionSettings` | controller → camera | acked by the camera |
+
+**`EventLowMemoryState` is quietly important**: it reports `process:"audio_events"`,
+`state:"enabled"`. `unifi-camera-reference.md` §10 records `ubnt_audio_events` as
+boot-disabled, which is why `ChangeAudioEventsSettings` was rated hazardous. On a
+camera adopted by a real controller **that daemon is running** — and the camera
+acks `ChangeAudioEventsSettings` normally.
+
+### 9.9 Direction is explicit, and acks echo the verb
+
+`from`/`to` make direction unambiguous — `ubnt_avclient` is the camera,
+`UniFiVideo` the controller. Counting by direction confirms the guides' ack model:
+`ChangeVideoSettings` appears **13× from the controller and 12× from the camera**,
+because the camera's ack reuses the same `functionName`. Correlate on
+name + `inResponseTo`, never on id alone. [MEASURED]
