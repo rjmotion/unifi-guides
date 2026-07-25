@@ -436,11 +436,22 @@ ubnt_avclient_paramAgreement (controller -> camera)
   {"enableStatusCodes": true, "useHeartbeats": false, "heartbeatsTimeoutMs": 60000}
 ```
 
-Three things: **`overrideUuid` is actually sent** (the guides list it as an
-unexercised escape hatch); the hello reply carries **no `adoptionCode` and no
-`features` block**; and `paramAgreement` carries **no `authToken` and no
-`features`** — nothing like the `{authToken, features, controllerUuid, uuid}` the
-guides record. Note `useHeartbeats: false` with a 60 s timeout. [MEASURED]
+The values matter as much as the key list:
+
+```json
+{"protocolVersion":67,"controllerName":"unifi-emu","controllerUuid":null,
+ "controllerVersion":"7.1.77","overrideUuid":true}
+```
+
+Three things: **`overrideUuid` is actually sent** — as a boolean `true`, alongside
+a `controllerUuid` of **`null`**, on every hello reply, not as the escape hatch the
+guides describe. The camera's persisted-UUID comparison is therefore a path the
+real controller never takes, which is what makes it possible to stand in for a
+console without resetting the camera. Next: the hello reply carries **no
+`adoptionCode` and no `features` block**; and `paramAgreement` carries **no
+`authToken` and no `features`** — nothing like the
+`{authToken, features, controllerUuid, uuid}` the guides record. Note
+`useHeartbeats: false` with a 60 s timeout. [MEASURED]
 
 ### 9.6 The PTZ channel is a separate WebSocket with subprotocol `ptz1`
 

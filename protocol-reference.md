@@ -179,14 +179,33 @@ The camera **persists the controller UUID it adopted under** and compares on
 reconnect: `UUID mismatch: has %s, received %s`. On mismatch it refuses to proceed
 past hello — no settings acks, no video — and the failure presents as "adoption
 looks fine but nothing streams". **Keep the UUID stable across restarts.** Sending
-it under both `controllerUuid` and `uuid` is safe. `overrideUuid` is the
-documented escape hatch (`Controller requested UUID override`), unexercised. [M]/[F]/[U]
+it under both `controllerUuid` and `uuid` is safe. [M]/[F]
+
+**`overrideUuid` is not an unexercised escape hatch — the real controller sends it
+on every hello reply**, with `controllerUuid` set to `null`:
+
+```json
+{"protocolVersion":67,"controllerName":"…","controllerUuid":null,
+ "controllerVersion":"7.1.77","overrideUuid":true}
+```
+
+So the mismatch path above is one the real controller never takes. This is also
+what lets a replacement controller adopt a camera that is already adopted
+elsewhere, without resetting it: send no UUID and set the override.
+See observations §9.5. [MEASURED]
 
 ### timeSync
 
 The camera sends `{"timeDelta": 0}` while its envelope `timeStamp` carries its
-real clock — it is asking *how wrong am I?* The reply carries `monotonicMs`,
-`wallMs`, `wallClockMs`, `time`, `seconds`, `timeDelta`.
+real clock — it is asking *how wrong am I?* **The reply is two keys**, both the
+controller's wall clock in milliseconds:
+
+```json
+{"t1": 1784981269413, "t2": 1784981269413}
+```
+
+None of `monotonicMs`, `wallMs`, `wallClockMs`, `time`, `seconds` or `timeDelta`
+appears. See observations §9.4. [MEASURED]
 
 **Measured negative:** this camera **does not apply time from the reply** — its
 `timeStamp` stays at the power-on epoch across every sync, and the burned-in OSD
