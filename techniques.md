@@ -367,3 +367,57 @@ uhardware block prob   # what the udev rules invoke
 `ustate dump states` is the authoritative view of what Protect believes about
 storage — bays, their `DISK_STATE_*`, and each space's `SPACE_TYPE_*`. It is also
 exactly the output the wider community has been asking real-UNVR owners for.
+
+---
+
+## 13. Correlate an API call to the message it produces
+
+The single fastest way to map the protocol. Drive the controller through any
+client while capturing `:7442` (technique 1), and each call reveals which
+`functionName` it emits.
+
+**Why it beats reading the binary:** `ubnt_avclient` has 138 handler names and the
+guides mark a dozen messages `[UNVERIFIED]` purely because nothing was known to
+trigger them. A real client *is* the trigger, and it exercises paths that adoption
+never touches — adoption only shows what the controller sends *unprompted*.
+
+### Choosing a client
+
+| Client | Language | Use it for |
+|---|---|---|
+| `uiprotect` | Python | **Breadth.** ~154 named `set_*` operations, so the API surface is itself the test checklist. No runtime to install where Python exists |
+| `hjdhjd/unifi-protect` | TypeScript | **Streams.** The only complete livestream implementation — direct H.264/HEVC/AV1 access. Needs Node ≥22.20 |
+
+`uiprotect` exposes named setters; hjdhjd deliberately offers a generic
+`updateDevice()`, so it is the wrong shape for discovery — you would need to know
+the field names already.
+
+### The loop
+
+```python
+start = wc_l('/srv/ds/logs/ds.log') + 1     # mark the log
+await cam.set_osd_name(True)                 # drive one operation
+await asyncio.sleep(4)                       # let the controller act
+tx, rx = frames_since(start)                 # reassemble (technique 2)
+# tx = messages where from == "UniFiVideo"   (controller -> camera)
+# rx = messages where from == "ubnt_avclient" (camera acks and events)
+await restore()                              # put the setting back
+```
+
+**Do one operation at a time and restore after each**, or you cannot attribute a
+message to a call. The 4-second wait matters: several settings are pushed
+asynchronously after the HTTP call returns.
+
+### Cautions
+
+- **Never drive `ChangeAnalyticsSettings`.** It resets the camera. Avoid any client
+  method whose name suggests analytics until you have checked where it lands.
+- **Save and restore.** Read the current value before changing it; some settings
+  are visible on recorded footage, and privacy masking blanks the stream.
+- **Check feature flags first.** `cam.feature_flags` tells you what the model
+  supports; driving `set_speaker_volume` at a camera with `has_speaker == False`
+  just returns `BadRequest` and wastes a cycle.
+- **Expect fan-out.** One API call can produce three messages. Do not assume a
+  one-to-one mapping.
+- **Expect silence.** Some settings never reach the camera at all — that is a
+  result, not a failure of the capture.

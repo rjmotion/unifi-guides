@@ -540,3 +540,76 @@ adoption exercises. `CameraFeatureFlags` alone enumerates `hasLiveviewTracking`,
 more. `struct CameraMessage {functionName, inResponseTo, messageId, timeStamp, …}`
 confirms the envelope shape from the other side. Anyone extending `cuckoo`'s
 `features` block should mine this list rather than guess.
+
+---
+
+## 11. API → wire mapping — `[MEASURED]`
+
+Driving the controller through a third-party client while capturing `:7442` in
+plaintext gives a direct mapping from *what you ask the controller to do* to *what
+it says to the camera*. Method in [`techniques.md`](techniques.md) §13.
+
+**Client:** `uiprotect` 15.14.2 (Python), authenticated as a local admin.
+**Capture:** `ds` payload logging (§9.1), frames reassembled and split by the
+`from` field.
+
+| API call | Controller sends |
+|---|---|
+| `set_osd_name`, `set_osd_date`, `set_osd_logo`, `set_osd_bitrate` | `ChangeOsdSettings` |
+| `set_status_light` | `ChangeSoundLedSettings` |
+| `set_video_mode` | `ChangeVideoSettings` |
+| `set_mic_volume` | `ChangeVideoSettings` |
+| **`set_ssh`** | **`StartService`** |
+| `set_person_detection`, `set_person_track` | `ChangeAudioEventsSettings`, `ChangePTZAutoTrackSettings`, `ChangeSmartDetectSettings` |
+| `set_recording_mode` | `ChangeSmartDetectSettings`, `ChangeSmartMotionSettings` |
+| `set_privacy` | `ChangeIspSettings` |
+| `set_vehicle_detection` | *(nothing — controller-side state only)* |
+
+### 11.1 `StartService` — this answers "what re-enables SSH?"
+
+`unifi-camera-reference.md` §4 records SSH as off by default and enabled "from a
+controller that has adopted the camera", with the mechanism `[UNVERIFIED]`. §9.8
+found the controller sending `StopService {"service":"ssh"}` during adoption. The
+counterpart is now confirmed:
+
+```
+cam.set_ssh(True)   ->   StartService     (controller -> camera, :7442)
+```
+
+**`StartService` appears nowhere in the guides' vocabulary.** Together with
+`StopService` it is a general service-control verb, which suggests other
+boot-disabled daemons — `ubnt_audio_events`, `ubnt_ptz` — may be startable the
+same way. That is worth testing: `unifi-camera-reference.md` §13 asks what
+re-enables `ubnt_ptz` given `rc.sysinit:523` disables it.
+
+### 11.2 One API call fans out to several messages
+
+`set_person_detection` and `set_person_track` each produce **three** messages.
+An emulated controller that sends only `ChangeSmartDetectSettings` when enabling
+person detection is not reproducing what a real one does.
+
+Note `ChangeAudioEventsSettings` among them, **acked normally**. That is the third
+independent confirmation that `protocol-reference.md` §6's "hazardous, tears down
+the control channel" rating was an artefact of testing against a camera whose
+`ubnt_audio_events` daemon was boot-disabled — see §9.8.
+
+### 11.3 Privacy masking is an ISP operation
+
+`set_privacy` produces `ChangeIspSettings`, not a dedicated message. The privacy
+mask is imaging-pipeline state, consistent with zoom and focus belonging to
+`ubnt_ispserver` rather than the gimbal.
+
+### 11.4 Mic volume rides in `ChangeVideoSettings`
+
+`set_mic_volume` produces `ChangeVideoSettings` — the message whose `audio` block
+is `{bitRate, volume}` (§9.3). So **`set_mic_volume` is the API path that sets the
+volume field**, which `unifi-camera-reference.md` §13 asks about. It does not by
+itself prove what a third-party controller must send, but it identifies the
+operation to watch when testing the two-key audio object.
+
+### 11.5 Not everything reaches the camera
+
+`set_vehicle_detection` produced **no `:7442` traffic at all** — the controller
+records it and acts on it during its own analysis. Useful negative information:
+an emulator does not need to implement everything the API exposes, and a message
+absent from a capture may simply never have existed.
