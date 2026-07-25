@@ -22,6 +22,13 @@ called out.
 > was lost to one of the failure modes documented there, and in every single case
 > the fault turned out to be in the tooling rather than the camera.
 
+**Placeholders.** Device identifiers are not published here. Substitute your own:
+
+| Placeholder | How to obtain it locally |
+|---|---|
+| `<CONTROLLER-IP>` | `ip -4 addr show scope global` on the controller host. The camera parses the netloc and dials it literally, so it must be an address the camera can reach |
+| `<AUTH-TOKEN>` | Read `/etc/persistent/ubnt_avclient.conf` on the camera over SSH (§4 for how to get a shell). It **rotates on re-adoption and factory reset**, and per §6 it is not what gates adoption — the camera generates its own |
+
 ---
 
 ## 1. Platform
@@ -69,7 +76,7 @@ Representative persisted state [MEASURED]:
 
 ```
 /etc/persistent/ubnt_avclient.conf
-  { "adopted": true, "authToken": "b477cc2f…", "cfgver": 1,
+  { "adopted": true, "authToken": "<AUTH-TOKEN>", "cfgver": 1,
     "hosts": ["wss://<CONTROLLER-IP>"], "uuid": "" }
 
 /etc/persistent/ptz/dynamic/ubnt_lastpos.conf

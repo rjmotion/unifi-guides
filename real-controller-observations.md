@@ -28,6 +28,19 @@ heading.
 | Date | 2026-07-25 |
 | Source | `/srv/unifi-protect/logs/cameras.avclient.log`, `cameras.log` |
 
+### Placeholders — how to get your own values
+
+Device identifiers are deliberately not published; they identify the machine a
+measurement ran on, not the finding. Substitute your own:
+
+| Placeholder | What it is | How to obtain it locally |
+|---|---|---|
+| `<CONTROLLER-IP>` | The address your controller listens on — the one cameras dial | `ip -4 addr show scope global` on the controller host. Must be the address the camera can reach; the camera parses the netloc and connects to it literally |
+| `<CAMERA-IP>` | The camera's own address | Your DHCP server's lease table, or the Protect UI's device page. The camera only listens on 22/80/443 and udp/10001 (§5 of the camera reference), so a sweep for tcp/443 finds it |
+| `<CAMERA-MAC>` | The camera's hardware address | Printed on the device label; also sent by the camera itself in the `camera-mac` WebSocket upgrade header and as `hwaddr` in its `ubnt_avclient_hello` (§3 of the protocol reference) |
+| `<CAMERA-ID>` | Protect's *internal* id for the camera — not a hardware value | `curl -sk -H "X-API-Key: $KEY" https://<CONTROLLER-IP>/proxy/protect/integration/v1/cameras`. Mint the key in the console UI under Control Plane → Integrations |
+| `<AUTH-TOKEN>` | Per-adoption token the camera generates for itself | Read `/etc/persistent/ubnt_avclient.conf` on the camera over SSH. **Rotates on re-adoption and factory reset**, so it is worthless to anyone else — and per §3, it is not what gates adoption anyway |
+
 **A note on evidence class.** These are **controller-side log statements** of the
 form `SENT <functionName> with payload <json>` — Protect reporting what it sent,
 not bytes captured off the wire. That is strong evidence of the message vocabulary
