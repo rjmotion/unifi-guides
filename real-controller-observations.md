@@ -495,3 +495,48 @@ acks `ChangeAudioEventsSettings` normally.
 `ChangeVideoSettings` appears **13× from the controller and 12× from the camera**,
 because the camera's ack reuses the same `functionName`. Correlate on
 name + `inResponseTo`, never on id alone. [MEASURED]
+
+---
+
+## 10. Controller internals worth knowing
+
+Not protocol, but useful context for anyone reproducing this. All from the running
+container. See [`techniques.md`](techniques.md) §7–8 for how.
+
+**`ds` is the camera-facing daemon.** A Rust binary (`tokio-tungstenite`) serving
+`:7442`, launched as `ds --config /usr/share/ds/ds.json` with
+`EnvironmentFile=-/etc/ds/default` — that file does not exist by default and is
+yours to create. Environment variables it honours include `LOG_LEVEL`,
+`SSL_CERTIFICATE_VERIFICATION_ENABLED`, `SSL_ALLOW_SELF_SIGNED`,
+`SSL_IGNORE_SNI_HOSTNAME`, `DS_RECORDING_DISABLED`, and a family of
+`WEBSOCKET_*` tunables (connection timeout, max failed handshakes per minute,
+reconnect blacklist thresholds).
+
+**The controller manages camera firmware.** `/srv/unifi-protect/downloads/`
+contained two `sav530q` images — `5.3.95` and `4.74.106` — so it fetches camera
+firmware on its own initiative. Relatedly, `devices.websockets.log` reports the
+camera's `firmwareVersion=4.74.106` at connection time, which does not match the
+`5.3.95` the other guides record as the device-of-record firmware. Treat "the
+camera's version" as ambiguous between firmware and middleware unless the source
+is explicit.
+
+**Ports `ms` listens on**, beyond the documented ones: `7441`, `7445`, `7446`,
+`7447`, `7451`, plus `7550` and `7552`. `7552` listening is notable given the
+per-track-port question in §3.1.
+
+**`ds` computes recording gating itself.** Its strings include
+`motion_only=false: no internal SSD, no /srv`,
+`motion_only=true: has internal SSD, no /srv`, and
+`Recording disabled via DS_RECORDING_DISABLED override` — a second, independent
+gate alongside `unifi-protect.service`'s `UFP_RECORDING_*` environment
+calculation.
+
+**Vocabulary available from `ds`'s own type definitions** — far larger than what
+adoption exercises. `CameraFeatureFlags` alone enumerates `hasLiveviewTracking`,
+`hasLineCrossing`, `hasLineCrossingCounting`, `presetTour`, `hasSmartZoom`,
+`hasOptimizeIr`, `streamEncryptable`, `supportFullHdSnapshot`,
+`hasTamperDetection`, `clarityZones`, `hasHallwayMode`, `hasPackageZoneSupport*`,
+`smartDetectAudioTypes`, `videoCodecs`, `audioCodecs`, `audioStyle` and dozens
+more. `struct CameraMessage {functionName, inResponseTo, messageId, timeStamp, …}`
+confirms the envelope shape from the other side. Anyone extending `cuckoo`'s
+`features` block should mine this list rather than guess.
