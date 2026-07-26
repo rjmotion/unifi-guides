@@ -1190,3 +1190,30 @@ re-served the **real camera's H.265 as standard RTSP**: `ffprobe` reports
 `hevc / Main / 2688x1512 / yuv420p / 30 fps` plus an AAC-LC track, and `ffmpeg`
 decoded a full 2688×1512 picture out of it. The controller side now works end to
 end against real hardware — adoption, PTZ, and video.
+
+---
+
+## 17. The ONVIF face, verified by a real client — `[MEASURED]`
+
+Every ONVIF unit test drives cuckoo with hand-formed SOAP: it proves cuckoo answers
+what cuckoo expects. That is not the same as answering what a *real* client demands.
+The acceptance test is Home Assistant's own ONVIF client — `python-onvif-zeep`, the
+`ONVIFCamera` stack HA uses — talking to a running cuckoo as a black box, with every
+response validated against the official ONVIF WSDL.
+
+Run against cuckoo fed by **finch** (synthetic) and by the **real G5 PTZ**, it walks
+HA's onboarding order: clock, capabilities, services, identity, profiles, stream URI
+(then it *plays the exact URI returned*), snapshot URI, PTZ enumerate and move, and
+the events pull-point. 14/14 in both cases — and against real hardware, the
+`AbsoluteMove` moved the physical head and the advertised RTSP URI played
+`hevc 2688x1512` + AAC.
+
+It found one real bug the unit tests were all green on: **`GetCapabilities` emitted
+its elements out of order.** ONVIF's `Capabilities` is a strict schema sequence —
+Device, Events, Imaging, Media, PTZ — and zeep silently drops any element that
+appears out of order. cuckoo had `Events` last, so zeep parsed it as absent; Home
+Assistant keys its motion/smart-detect sensors on Events being present in
+`GetCapabilities`, so it would have added the camera **with no event sensors at
+all**, showing nothing wrong. This is the same failure mode that once dropped a
+whole camera over a mis-ordered profile: **against a schema-validating client, XML
+element order is load-bearing, and only a real client catches it.**
