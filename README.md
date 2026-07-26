@@ -24,6 +24,7 @@ against real UniFi Protect 7.1.77.
 | If you want to… | Read |
 |---|---|
 | Know how any of this was found out | **[`techniques.md`](techniques.md)** |
+| See at a glance what's confirmed, and how well | **[`conformance-matrix.md`](conformance-matrix.md)** |
 | See what a real controller actually sends | **[`real-controller-observations.md`](real-controller-observations.md)** |
 | Implement the wire protocol | [`protocol-reference.md`](protocol-reference.md) |
 | Work on the camera as a device — SSH, daemons, PTZ | [`unifi-camera-reference.md`](unifi-camera-reference.md) |
