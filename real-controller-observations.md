@@ -1103,3 +1103,62 @@ Worth stating plainly, because the temptation is to keep trying: there is no
 message that takes an adopted camera away from its controller. Every attempt above
 was met with silence or `Unauthorized`. Custody is granted by the controller that
 holds it, and that is the mechanism to use.
+
+---
+
+## 16. cuckoo drives the real camera — the last two gates — `[MEASURED]`
+
+The camera-side impersonation (finch) worked long before the controller-side one
+(cuckoo) could drive real hardware. Two gates stood in the way, both found by
+capturing a real adoption in plaintext (`ds` trace, §10) and comparing it to what
+cuckoo did.
+
+### 16.1 timeSync is a ping-pong, and the controller must answer every one
+
+The camera does **not** say hello on connect. It opens, and sends
+`ubnt_avclient_timeSync` — then keeps sending it, roughly ten times, each message
+carrying `inResponseTo` referencing the controller's *previous* timeSync. The
+controller answers every one:
+
+```
+camera →  timeSync  inResponseTo=0            "how wrong am I?"
+       ←  timeSync  inResponseTo=<cam msgId>  {"t1":<ms>,"t2":<ms>}
+camera →  timeSync  inResponseTo=<ctrl msgId> "how wrong am I now?"
+       ←  timeSync  inResponseTo=<cam msgId>  {"t1":<ms>,"t2":<ms>}
+   … about ten round trips, until the camera's clock converges …
+camera →  hello     inResponseTo=0            adoptionCode="", full features
+```
+
+Only after that exchange does the camera introduce itself — **unprompted**, with
+an empty `adoptionCode`. The `{"t1","t2"}` reply payload (§9.4) is exactly right,
+and identical to what the real controller sends.
+
+The trap: a timeSync after the first carries `inResponseTo`, so a controller that
+treats "has inResponseTo" as "this is a reply, ignore it" answers only the first
+and goes silent. The ping-pong dies, the clock never converges, and the camera
+sits sending timeSync forever without ever reaching hello. **Answer every
+timeSync, reply flag or not.**
+
+### 16.2 The controller does not speak first
+
+It is tempting, when a camera connects and only pings timeSync, to send it a hello
+to get things moving. The real controller never does — it waits. An unprompted
+controller hello (with or without `overrideUuid`) is **ignored**: the camera does
+not reply to it and does not advance. The hello is the camera's to send, once its
+clock is set. (An older cuckoo did send an initiating hello and adopted anyway,
+which sent us down this path; against this firmware, waiting is correct.)
+
+### 16.3 Result
+
+With both corrected, cuckoo — pointed at the camera by its own `/api/1.2/manage`
+POST (§15.5) — completed a real adoption: ten timeSync round trips, the camera's
+hello, the settings suite acknowledged, `EnablePtzControl` accepted, motor bounds
+read from the hello (`pan 500..35500, tilt 8000..18000`), and the camera pushing
+**H.265 to cuckoo's ingest** — 37 MB in the first minute. The first time the
+controller side has driven real hardware rather than a fake camera.
+
+**Still open:** cuckoo's `extendedFlv` deframer, which reads finch's synthetic
+stream perfectly, does not find the parameter sets in the *real* camera's bytes,
+so the RTSP re-encode returns 503. The real stream's exact framing differs subtly
+from the synthetic one — the next thing to chase, with a clean capture of a fresh
+`:7550` connection header.
