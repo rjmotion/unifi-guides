@@ -1063,8 +1063,39 @@ is not enough.
 | **To a replacement controller** | resident controller releases the camera → replacement discovers it on UDP 10001 → replacement POSTs `/api/1.2/manage` → camera dials `:7442`, says hello, ordinary adoption |
 | **Back to the resident** | replacement stops → resident controller adopts it again through its own API → camera returns to `CONNECTED` |
 
-The second direction is one API call and was verified end to end. The first needs
-the `/api/1.2/manage` request, which remains **unimplemented and unverified here**.
+The second direction is one API call and was verified end to end. The first is now
+implemented — see §15.5 — and needs one thing that is not ours to invent.
+
+### 15.5 The manage handover, decoded
+
+The `/api/1.2/manage` POST — the step after discovery — is two requests, read from
+the camera side (unifi-cam-proxy) and confirmed against the controller side
+(Protect makes 208 of these while adopting):
+
+```
+POST https://<camera>/api/1.2/login    {"username":…, "password":…}
+    → 200, Set-Cookie: TOKEN=<hex>
+POST https://<camera>/api/1.2/manage    {"mgmt": {"token":…, "hosts":[…], "protocol":"wss"}}
+    with that cookie
+    → 200; the camera then dials hosts[0] and says hello
+```
+
+Two asymmetric facts:
+
+- **The manage `token` is the controller's to choose.** It becomes the
+  `adoptionCode` the camera quotes back in its hello, and the controller is the
+  thing that decides whether to accept it. It need not come from a real console.
+- **The login credential is the *camera's*, and cannot be chosen.** It is the
+  default (`ubnt`/`ubnt`) only on a factory-fresh or reset device; otherwise it is
+  whatever controller adopted the camera last set and stored. Unauthenticated, and
+  with a wrong credential, the endpoint returns a bare `401` with no
+  `WWW-Authenticate` header.
+
+So a replacement controller can point a camera at itself — but only with the
+camera's current management credential, which the previous controller holds. There
+is no wire-level way around this; custody is ultimately a shared secret, and
+handing it over is a decision for whoever owns the camera. Releasing the camera
+(§15.2) does **not** reset that credential.
 
 ### 15.4 An already-adopted camera is not a bug to work around
 
