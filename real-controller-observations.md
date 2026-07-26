@@ -1217,3 +1217,20 @@ Assistant keys its motion/smart-detect sensors on Events being present in
 all**, showing nothing wrong. This is the same failure mode that once dropped a
 whole camera over a mis-ordered profile: **against a schema-validating client, XML
 element order is load-bearing, and only a real client catches it.**
+
+### 17.1 WS-Discovery needs the ONVIF WS-Addressing namespace
+
+A real ONVIF client discovering the camera (Home Assistant uses `python-ws-discovery`)
+pairs the `2005/04` WS-Discovery draft with **WS-Addressing `2004/08`** —
+`http://schemas.xmlsoap.org/ws/2004/08/addressing` — not the later `2005/08`
+(`http://www.w3.org/2005/08/addressing`). It sends the probe's `MessageID` under
+2004/08, and expects the `ProbeMatch` back in the same namespace.
+
+A device that looks for the client's `MessageID` under 2005/08 finds nothing and
+silently drops the probe — no reply, and the camera simply never appears in
+discovery. This is invisible to a hand-written probe that also uses the wrong
+namespace (it round-trips fine); only the real client, or a probe captured off the
+wire, exposes it. The client also declares the ONVIF type under a *random*
+namespace prefix in `<d:Types>`, so a parser must compare NAL local names, not
+prefixes. `[MEASURED]` — reproduced with the exact library, fixed, and re-verified
+against it.
