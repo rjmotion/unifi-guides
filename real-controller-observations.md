@@ -1157,8 +1157,36 @@ read from the hello (`pan 500..35500, tilt 8000..18000`), and the camera pushing
 **H.265 to cuckoo's ingest** — 37 MB in the first minute. The first time the
 controller side has driven real hardware rather than a fake camera.
 
-**Still open:** cuckoo's `extendedFlv` deframer, which reads finch's synthetic
-stream perfectly, does not find the parameter sets in the *real* camera's bytes,
-so the RTSP re-encode returns 503. The real stream's exact framing differs subtly
-from the synthetic one — the next thing to chase, with a clean capture of a fresh
-`:7550` connection header.
+### 16.4 The real camera's sequence header is not an hvcC — RESOLVED
+
+The RTSP 503 was not a framing problem: the `extendedFlv` tag boundaries are exactly
+as documented (20 bytes between tags, every gap confirmed against a real capture).
+It was the *video sequence header* itself. Two differences from what a standard
+FLV/HEVC writer produces, both measured off a real G5 PTZ:
+
+- **The FLV/AVC packet-type byte is `1`, not `0`, even on the config tag.** A
+  reader that keys on it — as the AVC convention says — treats the parameter sets
+  as an ordinary frame and never parses them. **Config is signalled only by the
+  FLV frame type (`6`) in the high nibble of byte 0.**
+- **There is no hvcC record.** After the two-byte header, the sets are a bare run
+  of **2-byte length-prefixed** NAL units: `[len]VPS[len]SPS[len]PPS`, no
+  configuration prefix and no array structure. (The frame NALUs that follow use
+  **4-byte** lengths, as a normal hvcC would specify.)
+
+```
+video sequence-header tag body:
+  68            FLV: frame type 6 (sequence header), codec id 8 (HEVC)
+  01            packet-type byte — 1, where the AVC convention says 0
+  00 18         length 24
+  40 01 …       VPS (24 bytes)
+  00 2a         length 42
+  42 01 …       SPS (42 bytes)
+  00 07         length 7
+  44 01 …       PPS (7 bytes)
+```
+
+With config detected by frame type and the sets read from this layout, cuckoo
+re-served the **real camera's H.265 as standard RTSP**: `ffprobe` reports
+`hevc / Main / 2688x1512 / yuv420p / 30 fps` plus an AAC-LC track, and `ffmpeg`
+decoded a full 2688×1512 picture out of it. The controller side now works end to
+end against real hardware — adoption, PTZ, and video.
