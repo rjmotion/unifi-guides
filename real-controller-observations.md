@@ -882,3 +882,193 @@ wanting snapshots must serve it.
   does both.
 - Preset definitions include **focus**, so a four-axis model (pan/tilt/zoom/focus)
   is the right shape — not the three-axis one in cuckoo.old's `ptz-model.md`.
+
+---
+
+## 14. The camera side, measured by being one — `[MEASURED]`
+
+Everything above watches the controller. This section is the other direction:
+what a controller demands of a **camera**, learned by writing one
+([`finch`](https://github.com/rjmotion)) and getting it adopted, streaming and
+recorded by a real Protect 7.1.77.
+
+### 14.1 The adoption token is one API call
+
+```
+POST /api/auth/login                            → session cookie
+GET  /proxy/protect/api/cameras/manage-payload  → {"mgmt": {...}}
+```
+
+```json
+{"wifi": {}, "mgmt": {"protocol": "wss", "hosts": ["<CONTROLLER-IP>:7442"],
+                      "token": "<32-CHAR-TOKEN>"}}
+```
+
+The token is nested under `mgmt`, **not** at the top level, and lasts an hour. The
+camera quotes it twice: in the WebSocket URL as `?token=…` and in its hello as
+`adoptionCode`.
+
+### 14.2 The camera's handshake headers are load bearing
+
+`ds` does not terminate the camera connection — it **proxies** it to
+`ws://127.0.0.1:7448/ws`, forwarding the camera's headers. Get them wrong and the
+visible symptom is `HTTP error: 400 Bad Request` in `ds.log` with the socket
+closed immediately after the upgrade appears to succeed.
+
+What the real G5 sends:
+
+```
+GET /camera/1.0/ws HTTP/1.1
+Host: <CONTROLLER-IP>              ← no port
+Pragma: no-cache
+Cache-Control: no-cache
+Upgrade: websocket
+Connection: close, Upgrade         ← not plain "Upgrade"
+Sec-WebSocket-Key: …
+Sec-WebSocket-Version: 13
+Sec-WebSocket-Protocol: secure_transfer
+Origin: http://ws_camera_proto_secure_transfer
+camera-mac: <CAMERA-MAC>
+camera-ip: <CAMERA-IP>
+camera-model: 0xa59b               ← the hex system id, NOT "UVC G5 PTZ"
+camera-firmware: 5.3.95
+device-id: <UUID>                  ← stable per device
+x-guid: <UUID>                     ← per connection
+adopted: true|false
+```
+
+`camera-model` as a model *name* is enough on its own to be refused upstream.
+
+### 14.3 Nulls in a settings message are questions, not values
+
+`ChangeVideoSettings` arrives with `"fps": null`, `"bitRateVbrMax": null`,
+`"minClientAdaptiveBitRate": null` and `"enabled": false`. These are not settings
+to apply — they are the controller asking *what are you?*. A camera that echoes
+the nulls back has them **stored verbatim**, and the controller then believes it
+has a camera whose channels have no frame rate, no bitrate and are disabled — so
+it never asks for video and no stream is ever armed.
+
+Report real values instead, with `enabled: true` and the codec, and the controller
+immediately follows with a `ChangeVideoSettings` carrying `destinations`. This one
+behaviour is the difference between an adopted camera that does nothing and a
+working one.
+
+### 14.4 `onMetaData` is an AMF0 **object** with exactly nine keys
+
+Captured from the real camera's first tag on `:7550`:
+
+```
+audioBandwidth  = 64000      audioChannels = 1        audioFrequency = 16000
+channelId       = 0          extendedFormat = true    hasAudio = true
+hasVideo        = true       streamId = 1             streamName = "<16-CHAR-ALIAS>"
+```
+
+Two traps. The value is an AMF0 **object (`0x03`)**, where ffmpeg and most FLV
+writers emit an ECMA array (`0x08`). And the key set is nothing like ffmpeg's —
+there is no `width`, `height`, `framerate`, `videocodecid` or `duration`; the
+receiver takes geometry from the bitstream.
+
+**`channelId` is how the stream is identified.** Recordings are filed as
+`<MAC>_<channelId>`, and the media server logs
+`NO INPUT STREAM <MAC>_0 FOR RECORDING AVAILABLE YET` until a stream announces the
+matching id. `streamName` is the per-session alias the controller handed out in
+`avSerializer.parameters.streamName`.
+
+Channel map on the G5 PTZ: `video1` → channelId 0, streamId 1 · `video2` → 1, 2 ·
+`video3` → 2, 4.
+
+### 14.5 The 16-byte trailer, decoded
+
+The guides recorded its length; this is its content, confirmed against
+unifi-cam-proxy's `clock_sync.py` and our own capture:
+
+```
+00              one zero byte
+01 5F 90        0x015F90 = 90000   on video tags — the clock rate
+00 2B 11        0x002B11 = 11025   on everything else
+00 × 8          padding
+uint32          elapsed seconds × 100000
+```
+
+The real camera also emits `onClockSync` (`streamClock`, `streamClockBase`,
+`wallClock`) and `onMpma` (a bitrate envelope) as script tags every few seconds.
+
+### 14.6 The media server talks back on `:7550`
+
+The push socket is not one-way. Once a stream is linked, the receiver sends short
+TLV messages — 2-byte type, 2-byte length, then the body:
+
+```
+00 00 00 0c ff ff ff ff 00 00 00 00 00 ff 00 00     type 0, 12 bytes
+00 02 00 03 00 01 01                                type 2, 3 bytes
+00 02 00 03 80 00 01                                type 2, 3 bytes
+00 01 00 00                                         type 1, empty
+```
+
+Type 2 alternates between two bodies and arrives every few seconds, which is
+consistent with a stream-state or keepalive instruction. **Not yet decoded** — but
+a camera implementation that never reads its push socket will not notice these,
+and will not notice the receiver closing either. [UNVERIFIED beyond the framing]
+
+### 14.7 Success looks like this
+
+With the above corrected, a purely synthetic camera reaches
+`RECORDING STARTED <MAC>_2` in the media server's own log, having been discovered,
+adopted, configured and streamed to entirely over the real protocol — with
+**H.265**, which no existing camera-emulation project sends.
+
+---
+
+## 15. Custody — what it takes to move a camera between controllers — `[MEASURED]`
+
+Taking the socket is not taking the camera. Measured by pointing a replacement
+controller at a real, already-adopted G5 PTZ:
+
+### 15.1 An adopted camera says almost nothing
+
+Stop the resident controller, bind `:7442` yourself, and the camera reconnects
+within about 90 seconds — with `adopted: true` in its upgrade headers. Then:
+
+- it sends **`ubnt_avclient_timeSync` and nothing else**, roughly every 60s
+- it never sends a hello. The hello is how a camera *introduces itself to a new
+  controller*, and as far as this one is concerned it already has one
+- settings sent to it come back **`{"desc": "Unauthorized"}`**
+- an **unprompted hello from the controller is ignored** — no reply, no error, and
+  the connection is dropped at its own timeout. `overrideUuid` applies to a hello
+  the camera asked for, not to an introduction it did not
+
+So the `controllerUuid: null` + `overrideUuid: true` pair (§9.5) is *not* a way to
+steal an adopted camera. It is how a controller answers a camera that is already
+asking to be adopted.
+
+### 15.2 A released camera stops dialling entirely
+
+Ask the resident controller to release it — an ordinary unadopt, which needs no
+access to the camera — and its behaviour changes completely:
+
+- it **stops connecting to `:7442`** altogether
+- it starts answering discovery probes on **UDP 10001** again, ~178 bytes each
+- it is waiting to be *told where to go*: the controller reaches it over HTTPS on
+  port 443 with the adoption details (`POST /api/1.2/manage`), and only then does
+  it dial `:7442` and say hello
+
+This is the same native flow a factory-fresh camera follows, and it means a
+replacement controller needs that HTTPS step to take custody — the wire side alone
+is not enough.
+
+### 15.3 The practical shape of a handover
+
+| Direction | What has to happen |
+|---|---|
+| **To a replacement controller** | resident controller releases the camera → replacement discovers it on UDP 10001 → replacement POSTs `/api/1.2/manage` → camera dials `:7442`, says hello, ordinary adoption |
+| **Back to the resident** | replacement stops → resident controller adopts it again through its own API → camera returns to `CONNECTED` |
+
+The second direction is one API call and was verified end to end. The first needs
+the `/api/1.2/manage` request, which remains **unimplemented and unverified here**.
+
+### 15.4 An already-adopted camera is not a bug to work around
+
+Worth stating plainly, because the temptation is to keep trying: there is no
+message that takes an adopted camera away from its controller. Every attempt above
+was met with silence or `Unauthorized`. Custody is granted by the controller that
+holds it, and that is the mechanism to use.
